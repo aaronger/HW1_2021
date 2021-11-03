@@ -1,0 +1,163 @@
+---
+title: 'HW1: Forecasting Election Results'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+Learning goals in this HW are:
+
+- gain more experience investigating and then implementing iteration within functions
+- develop a habit of making commits of work and keeping your GitHub remote repo in sync with your local one 
+
+The scenario for this HW is the following. A notional election with two candidates, A and B, is going to be held in 5 weeks in a country with 52 states. We would like to make a probabilistic forecast for the outcome of the election based on the past 11 weeks of weekly polling results of the percent of voters in each state supporting candidate A. This is a popular election so we all we need to consider is the population-weighted aggregate of state-level vote shares for candidate A. 
+
+Instead of looking at any real polling numbers or populations, we're going to simulate 11 weeks of weekly polling results using a *random walk* (RW) model and also simulate 52 state fractions of the national population. We will then "forget" how we produced the polling data and fit a __new__ RW model to the data with the goal of using this model along with the simulated population fractions to forecast the result of the election.
+
+Side note: This is part of a common strategy in statistics for investigating and evaluating a modeling technique - use a model to create data and then see how well the model performs at some task when fit on that data.
+
+For this HW, you are provided with a function (in the subdirectory `/R`) that simulates the polling data along with code (in this Rmarkdown file) for simulating the population fractions, using the fractions to aggregate the simulated polling data to the national level, and visualizing the state and derived national results together.
+
+Your tasks are to 
+
+1. work through the current code and understand what it does
+2. fit a RW model (as explained below) to the simulated polling data
+3. forecast the outcome of the election in 5 weeks using that model
+
+# Step 0
+
+A. Load libraries
+```{r, include = FALSE}
+library(tidyverse)
+```
+
+
+B. Save functions in R sub-folder and source all.
+
+Notes: 
+
+- in HW2, we will learn how to make the code base of a project easily loadable by setting it up as an R package; but for now we'll use the following "hack" to quickly get functions in the `/R` directory loaded.
+- If you edit `simulate_data.R` or create other script files, you also might consider checking the box "Source on Save"
+```{r}
+# this sources any .R file in the subfolder R
+Rfiles <- list.files(file.path(paste0(getwd(),"/R/")), ".R")
+Rfiles <- Rfiles[grepl(".R", Rfiles)]
+sapply(paste0(paste0(getwd(),"/R/"), Rfiles), source)
+```
+
+
+# Step 1: simulate the data
+
+Our approach to simulating the proportion $p(s,t)$ supporting candidate A in state $s$ on week $t$:
+
+- fix (randomly chosen) proportions $p(s,0)$ at $t=0$
+- in each state, for logit-transformed proportions, "randomly walk" with drift $d$ and standard deviation $sd_{rw}$ from each week to the next. 
+
+The random walk model is defined as follows: 
+$$\text{logit}(p(s, t)) = \text{logit}(p(s, t-1)) + \varepsilon(s,t)$$
+where $\varepsilon(s,t) \sim N(d, sd_{rw})$. Or in pseudo R-code: 
+
+logit(p(s, t)) = logit(p(s, t-1)) + rnorm(1, mean = d, sd = sd_rw)
+
+```{r}
+nstates <- 52
+
+# props at t = 0: 
+set.seed(123)
+rw0 <- runif(nstates, 45, 60)
+
+# RW-based simulations
+rw <- simulate_rw(rw0 = rw0, sd_rw = 0.05, 
+                  n_steps = 10, # weeks here 
+                  drift = 0.01, 
+                  seed = 1234)
+rw
+```
+Approach to obtain state weights...
+here we sample from a Gamma distribution to get some positive outcomes, and then standardize 
+```{r}
+set.seed(123456)
+state_weights <- rgamma(nstates, 1, 1)
+state_weights_dat <- tibble(
+  state = seq_len(nstates),
+  state_weights_std = state_weights/sum(state_weights))
+
+ggplot(state_weights_dat) +
+  geom_histogram(aes(x = state_weights_std))
+```
+
+# Step 2: calculate the national aggregate percentage.
+
+The national aggregated percentage is the weighted average of the state-specific outcomes, with weights given by the standardized state weights. 
+
+Easy approach here: just go for a data set in the long format, then add average for each year. 
+
+Note: we could consider re-organizing this information to avoid repeated information but leaving things in long form usually the easiest way to hand data off to `ggplot`.
+```{r}
+rw_long <- 
+  rw %>% 
+    left_join(state_weights_dat) %>%
+    pivot_longer(-c(state, state_weights_std),  
+             names_to = "t",
+             values_to = "percent") %>%
+    mutate(t = as.numeric(t)) %>% 
+    group_by(t) %>%
+    mutate(agg = sum(percent*state_weights_std))   
+
+rw_long
+rw_long %>% arrange(t)
+```
+
+
+# Step 3: data visualization
+Let's look at what we got so far
+```{r}
+rw_long %>%
+  ggplot(aes(x = t, y = percent,
+        group = state)) +
+    geom_point(alpha = 0.3) + 
+    geom_line(alpha = 0.3) +
+    geom_line(aes(y = agg), color = "blue", size = 1.5)
+```
+
+# Step 4: fit the RW model to your "data"
+
+Now let's "forget" what RW parameters (drift and sd_rw) were used. Can you estimate them based on the available data?
+
+The answer is yes!
+
+Approach: 
+
+1. calculate the differences $e(s,t) = \text{logit}(p(s,t)) - \text{logit}(p(s, t-1))$.
+2. your estimate for $d$ is given by the mean of all $e(s,t)$
+2. your estimate for $sd_rw$ is given by the standard deviation of all $e(s,t)$
+
+You should write a function returns the drift as well as the sd_rw estimate in a list, using, e.g.,
+return(list(sd_rw = bla, drift = bla2))
+
+
+# Step 5: On to making forecasts...
+
+With the estimated drift and sd for the random walk, we can forecast arbitrarily many future 5 week trajectories for each state, using the random walk equation
+
+`logit(p(s, t)) = logit(p(s, t-1)) + rnorm(1, mean = d, sd = sd_rw)`
+
+in order to generate each of the 5 weeks forecasted results from those of the preceeding week.
+
+We can then aggregate those to the national level to get 5 weeks of a national forecast with uncertainty...
+
+Your task: 
+
+- Write a function to make state forecasts. 
+- Forecast 5 weeks out, 100 trajectories per state. 
+- Aggregate to get 100 national level trajectories
+- Visualize the mean and 5th and 95th percentiles for the national forecast. 
+
+We will work on the steps invloved in accomplishing this in class.
+
+
